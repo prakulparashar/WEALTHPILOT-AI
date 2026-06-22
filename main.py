@@ -1,12 +1,16 @@
 from typing import List, Dict, Any, Literal
 from typing_extensions import TypedDict
 from pydantic import BaseModel, Field
-from langchain_core.messages import HumanMessage, SystemMessage, BaseMessage
+from langchain_core.messages import HumanMessage, SystemMessage, BaseMessage, ToolMessage
 from langchain_groq import ChatGroq
 from langgraph.graph import StateGraph, START, END
 import os
 from dotenv import load_dotenv
 import yfinance as yf
+from enum import Enum
+from langchain_core.tools import tool
+from typing import Optional
+
 
 load_dotenv()
 
@@ -23,12 +27,155 @@ class AGENTState (TypedDict):
     next_step: str
     final_report: str
 
+                                                                                       # 2. TOOLS(for stock_analyser_node)
+@tool
+def fetch_specific_stock_metrics(ticker: str) -> str:
+    """
+    Fetches comprehensive real-time financial valuation, safety, and performance metrics 
+    for a specific company ticker symbol (e.g., 'AAPL', 'TSLA', 'NVDA').
+    Use this tool when the user asks about a specific stock asset.
+    """
+    try:
+        stock = yf.Ticker(ticker.upper().strip())
+        info = stock.info
+        metrics = {
+            "Company Name": info.get("longName", ticker),
+            "Current Price": f"${info.get('regularMarketPrice', 'N/A')}",
+            "Trailing P/E Ratio": info.get("trailingPE", "N/A"),
+            "Debt-to-Equity Ratio": info.get("debtToEquity", "N/A"),
+            "Return on Equity (ROE)": f"{info.get('returnOnEquity', 0) * 100:.2f}%" if info.get("returnOnEquity") else "N/A",
+            "Beta (Volatility Index)": info.get("beta", "N/A")
+        }
+        return "\n".join([f"{k}: {v}" for k, v in metrics.items()])
+    except Exception as e:
+        return f"Error fetching stock data for {ticker}: {str(e)}"
 
-                                                                                        # 2. NODES
+@tool
+def fetch_macroeconomic_benchmarks() -> str:
+    """
+    Fetches broad macroeconomic index and bond yield data, including the S&P 500 (SPY), 
+    Total Bond Market (BND), and the 10-Year Treasury Yield (^TNX).
+    Use this tool when the user provides general cash amounts or financial planning goals 
+    without naming a specific company.
+    """
+    try:
+        context = "--- LIVE GLOBAL MACRO BACKDROP ---\n"
+        for symbol, name in [("SPY", "S&P 500 ETF"), ("BND", "Total Bond ETF"), ("^TNX", "10-Yr Treasury Yield")]:
+            ticker = yf.Ticker(symbol)
+            price = ticker.info.get("regularMarketPrice", "N/A")
+            context += f"{name} ({symbol}) Current Level/Price: {price}\n"
+        return context
+    except Exception as e:
+        return f"Error fetching macroeconomic benchmarks: {str(e)}"
+                                                                                        # 3. NODES
 
 
-# NODE: ORCHESTRATOR 
-def orchestrator_node(state: AGENTState) -> AGENTState:
+
+    
+
+# ----------------- NODE: STOCK ANALYSIS---------------- 
+def stock_analyser_node(state: AGENTState) -> dict:
+    
+    user_goal = state.get("user_request", "")
+    
+    tools_list = [fetch_specific_stock_metrics, fetch_macroeconomic_benchmarks]
+    tools_map = {tool.name: tool for tool in tools_list}
+    
+    llm_with_tools = llm.bind_tools(tools_list)
+    
+    #human and system message
+    messages = [
+        SystemMessage(content=(
+            "You are an autonomous Financial Data Agent. Your goal is to review the user's investment query "
+            "and determine exactly what financial data is required to run a high-quality analysis.\n\n"
+            "Look at the tools available to you. If the user mentions a specific stock, invoke the stock metrics tool. "
+            "If they give an open-ended goal, fetch the macro benchmarks. Review the outputs of your tool calls, "
+            "and once you have gathered the data context you need, synthesize a deep qualitative equity/macro report "
+            "for the downstream advisor node. Do not output math or specific cash allocations."
+        )),
+        HumanMessage(content=user_goal)
+    ]
+    
+    max_iterations = 5
+    iterations = 0
+    while iterations < max_iterations:
+        iterations += 1
+
+        print("Invoking LLM to determine next step...")
+        response = llm_with_tools.invoke(messages) #llm_with_tools ALWAYS responds with an AImessage which consists of a tool_calls array which consists of all the tools that the LLM requested for
+        messages.append(response)
+        
+        # Check if the LLM chose to call a tool or if it is ready to give a final text analysis
+        if not response.tool_calls: #tool not called by LLM(tool_calls array is empty), all info is gathered (this if statement will always be skipped on the first iteration of the while loop)
+            return {"stock_analysis": response.content} #infinite loop ends
+            
+        # iterate the tool_calls array
+        for tool_call in response.tool_calls:
+            tool_name = tool_call["name"]
+            tool_args = tool_call["args"]
+            print(f"-> LLM requesting tool execution: {tool_name}({tool_args})")
+            
+            target_tool = tools_map[tool_name]
+            tool_output = target_tool.invoke(tool_args) #now the LLM requests the tools and python runs it
+            
+            # Append the tool message
+            messages.append(ToolMessage(content=str(tool_output), tool_call_id=tool_call["id"])) #response by the tools are appended in the message, and again sent to LLM so it can now use human,system,ai,tool messages to create the final response. THIS IS STANDARD BEHAVIOUR OF TOOLS AND LLM
+
+    return {"stock_analysis": "Unable to complete analysis within iteration limit."}
+
+
+# -----------------NODE: PORTFOLIO ADVISOR----------------- 
+class AssetAllocation(BaseModel):
+    asset_class: Literal["Equities", "Fixed Income", "Cash", "Alternative Assets"] = Field(
+        description="The category of the financial asset."
+    )
+    ticker: str = Field(description="Ticker symbol or identifier (e.g., 'AAPL', 'BND', 'CASH').")
+    percentage: float = Field(description="The allocation percentage of the total portfolio (e.g., 45.5).")
+    justification: str = Field(description="One-sentence structural reasoning based on the stock analysis.")
+
+class PortfolioStrategy(BaseModel):
+    risk_profile: Literal["Conservative", "Moderate", "Aggressive"] = Field(
+        description="Assessed risk tolerance baseline based on the market backdrop."
+    )
+    allocations: List[AssetAllocation] = Field(description="List of specific asset distributions.")
+
+def portfolio_advisor_node(state: AGENTState) -> dict:
+    print("\n--- [Executing Node]: Portfolio Advisor ---")
+    
+    market_context = state.get("stock_analysis", "")
+    user_goal = state.get("user_request", "")
+    
+    #  Bind the Pydantic schema to your LLM to force structured response
+    llm_structured = llm.with_structured_output(PortfolioStrategy)
+    
+    system_prompt = (
+        "You are an expert Portfolio Risk Management Consultant. Your job is to translate qualitative "
+        "stock or macroeconomic analysis reports into concrete, quantitative asset allocation models.\n\n"
+        "Review the background report carefully. Ensure that the total allocation percentages add up "
+        "exactly to 100%. Provide deep, clear structural justifications for every single asset you pick."
+    )
+    
+    human_prompt = f"User Request: {user_goal}\n\nFinancial Context Report:\n{market_context}"
+    
+    #  Invoke the structured model
+    structured_response = llm_structured.invoke([
+        SystemMessage(content=system_prompt),
+        HumanMessage(content=human_prompt)
+    ])
+
+    return {"portfolio_allocation": str(structured_response.model_dump_json(indent=2))}
+    
+
+
+
+
+
+# -----------------NODE: FINAL REPORT GENERATION ------------------------
+def report_generator_node(state: AGENTState) -> dict:
+    pass
+
+# -----------------NODE: ORCHESTRATOR ------------------------------
+def orchestrator_node(state: AGENTState) -> dict:
     if not state.get("stock_analysis"):
         return{"next_step" : "stock_analyser"}
     elif not state.get("portfolio_allocation"):
@@ -37,103 +184,11 @@ def orchestrator_node(state: AGENTState) -> AGENTState:
         return{"next_step" : "report_generator"}
     else:
         return{"next_step" : "FINISH"}
-    
-
-
-
-# NODE: STOCK ANALYSER 
-import yfinance as yf
-from langchain_core.messages import SystemMessage, HumanMessage
-
-def stock_analyser_node(state: AGENTState) -> dict:
-    print("\n--- [Executing Node]: Stock Analyser ---")
-    
-
-    user_goal = state.get("user_request", "")
-    
-   
-    print("Fetching deep market metrics via yfinance...")
-    try:
-        #  SPY (S&P 500 ETF) 
-        spy_ticker = yf.Ticker("SPY")
-        spy_info = spy_ticker.info
-        
-       
-        market_metrics = {
-            "Current Price": f"${spy_info.get('regularMarketPrice', 'N/A')}",
-            "Trailing P/E Ratio": spy_info.get("trailingPE", "N/A"),
-            "Forward P/E Ratio": spy_info.get("forwardPE", "N/A"),
-            "Price-to-Book (P/B) Ratio": spy_info.get("priceToBook", "N/A"),
-            "Dividend Yield": f"{spy_info.get('dividendYield', 0) * 100:.2f}%" if spy_info.get("dividendYield") else "N/A",
-            "52-Week High": f"${spy_info.get('fiftyTwoWeekHigh', 'N/A')}",
-            "52-Week Low": f"${spy_info.get('fiftyTwoWeekLow', 'N/A')}",
-            "50-Day Moving Average": f"${spy_info.get('fiftyDayAverage', 'N/A')}",
-            "Beta (Volatility Index)": spy_info.get("beta", "N/A")
-        }
-        
-        # Format the dictionary into a highly readable, structured text block for the LLM
-        financial_context = "--- LIVE MACRO MARKET DATA BACKGROUND ---\n"
-        for key, value in market_metrics.items():
-            financial_context += f"{key}: {value}\n"
-            
-    except Exception as e:
-        financial_context = f"--- LIVE MACRO MARKET DATA BACKGROUND ---\n[Warning]: Failed to fetch real-time metrics due to network/API error: {str(e)}\n"
-
-    # 3. Establish the strict specialist persona
-    system_instruction = (
-        "You are a Senior Equity Research Analyst. Your sole job is to synthesize the provided "
-        "live market data backdrop and the user's personal investment goals to discover viable market sectors, "
-        "macro-level trends, and industry-specific growth trajectories. Highlight core industry risks, "
-        "valuation warnings (based on P/E or P/B imbalances), or volatility factors (indicated by Beta).\n\n"
-        "CRITICAL CONSTRAINT: Do NOT calculate specific portfolio percentage splits, numeric asset "
-        "weightings, or absolute cash allocations. Leave all asset allocation math entirely to the downstream advisor node. "
-        "Provide your entire research findings as deep qualitative text analysis."
-    )
-    
-    # 4. Construct the comprehensive data-driven Human Message payload
-    user_prompt_with_data = (
-        f"{financial_context}\n"
-        f"--- USER INVESTMENT REQUEST ---\n"
-        f"User Intent: {user_goal}\n\n"
-        f"Instructions: Use the macro dataset context provided above to ground your analysis. "
-        f"Provide a sophisticated, qualitative equity research assessment based on these real-time variables."
-    )
-    
-    messages = [
-        SystemMessage(content=system_instruction),
-        HumanMessage(content=user_prompt_with_data)
-    ]
-    
-    # 5. Invoke Groq
-    response = llm.invoke(messages)
-    
-    # 6. Push the data-rich summary directly onto the shared blackboard
-    return {"stock_analysis": response.content}
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-# NODE: PORTFOLIO ADVISOR 
-def portfolio_advisor_node(state: AGENTState) -> AGENTState:
-    pass
-# NODE: FINAL REPORT GENERATION 
-def report_generator_node(state: AGENTState) -> AGENTState:
-    pass
 #ROUTE DECIDER FUNCTION
 def route_next(state:  AGENTState):
     return state["next_step"]
+
+
 
 
                                                                                         # FINAL GRAPH
