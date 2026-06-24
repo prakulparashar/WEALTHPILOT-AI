@@ -14,7 +14,7 @@ from typing import Optional
 
 load_dotenv()
 
-llm = ChatGroq(model="llama3-70b-8192", temperature=0.2)
+llm = ChatGroq(model="llama-3.3-70b-versatile", temperature=0.2)
 
 
 
@@ -24,10 +24,12 @@ class AGENTState (TypedDict):
     user_request: str
     stock_analysis: str
     portfolio_allocation: str
+    security_selection: str
     next_step: str
     final_report: str
 
                                                                                        # 2. TOOLS(for stock_analyser_node)
+
 @tool
 def fetch_specific_stock_metrics(ticker: str) -> str:
     """
@@ -67,11 +69,61 @@ def fetch_macroeconomic_benchmarks() -> str:
         return context
     except Exception as e:
         return f"Error fetching macroeconomic benchmarks: {str(e)}"
+    
+
+
+
+@tool #used by security selector node, fetches market price of top stocks
+def screen_top_market_securities(custom_tickers: Optional[List[str]] = None) -> str:
+    """
+    Fetches real-time fundamental data, current pricing, valuation metrics, and health indicators 
+    for a list of high-quality market securities. Use this tool inside the security selector node 
+    to choose real, active stocks that match the macro asset allocation percentages.
+    """
+    # Default list of institutional heavyweights across Equities and Fixed Income if none provided
+    tickers = custom_tickers if custom_tickers else ["AAPL", "MSFT", "GOOGL", "AMZN", "NVDA", "VOO", "BND", "AGG"]
+    
+    print(f"-> Tool running: Screening real-time market data for {tickers}...")
+    screen_results = ["--- LIVE SECURITY SCREENER METRICS ---"]
+    
+    for ticker in tickers:
+        try:
+            stock = yf.Ticker(ticker.upper().strip())
+            info = stock.info
+            
+            
+            name = info.get("longName", ticker)
+            price = info.get("regularMarketPrice", "N/A")
+            forward_pe = info.get("forwardPE", "N/A")
+            profit_margin = f"{info.get('profitMargins', 0) * 100:.2f}%" if info.get('profitMargins') else "N/A"
+            fifty_day_ma = info.get("fiftyDayAverage", "N/A")
+            market_cap = info.get("marketCap", "N/A")
+            roe = info.get("returnOnEquity", "N/A")
+            beta = info.get("beta", "N/A")
+            revenue_growth = info.get("revenueGrowth", "N/A")
+            
+            screen_results.append(
+                        f"[{ticker}] {name}\n"
+                        f"   - Current Price: ${price} (50-Day Avg: ${fifty_day_ma})\n"
+                        f"   - Forward P/E: {forward_pe}\n"
+                        f"   - Profit Margin: {profit_margin}\n"
+                        f"   - Revenue Growth: {revenue_growth}\n"
+                        f"   - Return on Equity: {roe}\n"
+                        f"   - Beta: {beta}\n"
+                        f"   - Market Cap: {market_cap}\n"
+                    )
+        except Exception as e:
+            screen_results.append(f"[{ticker}] Error gathering live feed: {str(e)}")
+            
+    return "\n".join(screen_results)
+    
+
+
+
                                                                                         # 3. NODES
 
 
 
-    
 
 # ----------------- NODE: STOCK ANALYSIS---------------- 
 def stock_analyser_node(state: AGENTState) -> dict:
@@ -124,55 +176,17 @@ def stock_analyser_node(state: AGENTState) -> dict:
     return {"stock_analysis": "Unable to complete analysis within iteration limit."}
 
 
-# -----------------NODE: PORTFOLIO ADVISOR----------------- 
-class AssetAllocation(BaseModel):
-    asset_class: Literal["Equities", "Fixed Income", "Cash", "Alternative Assets"] = Field(
-        description="The category of the financial asset."
-    )
-    ticker: str = Field(description="Ticker symbol or identifier (e.g., 'AAPL', 'BND', 'CASH').")
-    percentage: float = Field(description="The allocation percentage of the total portfolio (e.g., 45.5).")
-    justification: str = Field(description="One-sentence structural reasoning based on the stock analysis.")
-
-class PortfolioStrategy(BaseModel):
-    risk_profile: Literal["Conservative", "Moderate", "Aggressive"] = Field(
-        description="Assessed risk tolerance baseline based on the market backdrop."
-    )
-    allocations: List[AssetAllocation] = Field(description="List of specific asset distributions.")
-
-def portfolio_advisor_node(state: AGENTState) -> dict:
-    print("\n--- [Executing Node]: Portfolio Advisor ---")
-    
-    market_context = state.get("stock_analysis", "")
-    user_goal = state.get("user_request", "")
-    
-    #  Bind the Pydantic schema to your LLM to force structured response
-    llm_structured = llm.with_structured_output(PortfolioStrategy)
-    
-    system_prompt = (
-        "You are an expert Portfolio Risk Management Consultant. Your job is to translate qualitative "
-        "stock or macroeconomic analysis reports into concrete, quantitative asset allocation models.\n\n"
-        "Review the background report carefully. Ensure that the total allocation percentages add up "
-        "exactly to 100%. Provide deep, clear structural justifications for every single asset you pick."
-    )
-    
-    human_prompt = f"User Request: {user_goal}\n\nFinancial Context Report:\n{market_context}"
-    
-    #  Invoke the structured model
-    structured_response = llm_structured.invoke([
-        SystemMessage(content=system_prompt),
-        HumanMessage(content=human_prompt)
-    ])
-
-    return {"portfolio_allocation": str(structured_response.model_dump_json(indent=2))}
-    
 
 
 
 
 
-# -----------------NODE: FINAL REPORT GENERATION ------------------------
-def report_generator_node(state: AGENTState) -> dict:
-    pass
+
+
+
+
+
+                                                                                        # ORCHESTRATOR
 
 # -----------------NODE: ORCHESTRATOR ------------------------------
 def orchestrator_node(state: AGENTState) -> dict:
@@ -180,6 +194,8 @@ def orchestrator_node(state: AGENTState) -> dict:
         return{"next_step" : "stock_analyser"}
     elif not state.get("portfolio_allocation"):
         return{"next_step" : "portfolio_advisor"}
+    elif not state.get("security_selection"):
+        return{"next_step": "security_selector"}
     elif not state.get("final_report"):
         return{"next_step" : "report_generator"}
     else:
@@ -197,6 +213,7 @@ agent_graph = StateGraph(AGENTState)
 agent_graph.add_node("orchestrator", orchestrator_node)
 agent_graph.add_node("stock_analyser", stock_analyser_node)
 agent_graph.add_node("portfolio_advisor", portfolio_advisor_node)
+agent_graph.add_node("security_selector", security_selector_node)
 agent_graph.add_node("report_generator", report_generator_node)
 
 agent_graph.add_edge(START, "orchestrator")
@@ -204,6 +221,7 @@ agent_graph.add_edge(START, "orchestrator")
 #all report back to the orchestrator, MAIN RULE OF OUR MULTI-AGENT PIPELINE, EVERY SUB AGENT HAS A PARENT 
 agent_graph.add_edge("stock_analyser", "orchestrator")
 agent_graph.add_edge("portfolio_advisor", "orchestrator")
+agent_graph.add_edge("security_selector", "orchestrator")
 agent_graph.add_edge("report_generator", "orchestrator")
 
 #PARENT ORCHESTRATOR DECIDES WHICH NODE TO REACH BY CHECKING -> 1. IF stock_analysis STATE IS EMPTY, REACH THE stock_analyser_node WHICH POPULATES THE stock_analysis STATE AND REPORTS BACK TO ORCHESTRATOR    2. NOW stock_analysis STATE IS FILLED BUT portfolio_allocation STATE IS EMPTY, SO NOW ORCHESTRATOR REACHED THE portfolio_analyser_node WHICH POPULATES THE portfolio_allocation STATE AND AGAIN THE NODE REPORTS BACK TO THE ORCHESTRATOR.     3.NOW THE ORCHESTRATOR SEES THAT BOTH THE STATES ARE FILLED, SO IT REACHES THE report_generation_node WICH FILLS THE final_report STATE and again reports to orchestrator.      4.NOW THE ORCHESTRATOR SEES THAT ALL THREE STATES ARE FILLED, SO IT FINALLY REACHES THE END. 
@@ -212,6 +230,7 @@ agent_graph.add_conditional_edges(
     route_next,{                               ##ROUTE DECIDER FUNCTION used here
         "stock_analyser": "stock_analyser",
         "portfolio_advisor": "portfolio_advisor",
+        "security_selector": "security_selector",
         "report_generator": "report_generator",
         "FINISH": END
     }
@@ -219,4 +238,27 @@ agent_graph.add_conditional_edges(
 
 
 agent_pipeline = agent_graph.compile()
+
+
+if __name__ == "__main__":
+    # 1. Define the initial state with a test investment request
+    initial_input = {
+        "user_request": "I have $100,000 to invest. I want an aggressive strategy focused heavily on growth stocks for a 10-year horizon, but I want a 15% cash safety net to protect against high market volatility.",
+        "stock_analysis": "",
+        "portfolio_allocation": "",
+        "security_selection": "",
+        "next_step": "",
+        "final_report": ""
+    }
+    
+    print("=================== INITIATING WEALTH MANAGEMENT PIPELINE ===================")
+    
+    # 2. Run the compiled graph pipeline synchronously
+    final_state = agent_pipeline.invoke(initial_input)
+    
+    print("\n======================= PIPELINE EXECUTION COMPLETE =======================")
+    print("\nGenerated Investment Prospectus:\n")
+    
+    # 3. Print the final compiled document from the publisher node
+    print(final_state.get("final_report"))
 
