@@ -180,6 +180,52 @@ def stock_analyser_node(state: AGENTState) -> dict:
 
 
 
+# -----------------NODE: PORTFOLIO ADVISOR----------------- 
+class MacroAllocation(BaseModel): #basemodel = pydantic
+    equities_percentage: float = Field(description="Total allocation percentage for Equities (0-100).")
+    fixed_income_percentage: float = Field(description="Total allocation percentage for Bonds/Fixed Income (0-100).")
+    cash_percentage: float = Field(description="Total allocation percentage for Liquid Cash/Money Markets (0-100).")
+    macro_reasoning: str = Field(description="A concise 2-sentence structural rationale for this macro mix based on the market conditions.")
+
+
+#ABOVE PYDANTIC SCHEMA IS POPULATED BY THE NODE BELOW (llm.with_structured_output)
+
+
+def portfolio_advisor_node(state: AGENTState) -> dict:
+    print("\n--- [Executing Node]: Portfolio Advisor (Macro Allocation) ---")
+    
+    analysis_report = state.get("stock_analysis", "")
+    user_goal = state.get("user_request", "")
+    
+    # Force the LLM to strictly return data matching our Pydantic schema
+    structured_llm = llm.with_structured_output(MacroAllocation)
+    
+    system_prompt = (
+        "You are a Chief Investment Strategist. Your single responsibility is to establish the top-level "
+        "macro asset allocation (Equities vs Fixed Income vs Cash) based on a qualitative market analysis report.\n\n"
+        "Do NOT pick individual stocks or tickers yet. Your allocation percentages MUST add up exactly to 100%."
+    )
+    
+    human_prompt = f"User Investment Target: {user_goal}\n\nFinancial Context Report:\n{analysis_report}"
+    
+    # Invoke the model
+    macro_result = structured_llm.invoke([
+        SystemMessage(content=system_prompt),
+        HumanMessage(content=human_prompt)
+    ])
+    
+    # Store the result as a structured string for the downstream Security Selector
+    formatted_allocation = (
+        f"Macro Asset Split:\n"
+        f"- Equities: {macro_result.equities_percentage}%\n"
+        f"- Fixed Income: {macro_result.fixed_income_percentage}%\n"
+        f"- Cash: {macro_result.cash_percentage}%\n\n"
+        f"Strategy Rationale: {macro_result.macro_reasoning}"
+    )
+    
+    print(f"-> Strategic Mix Determined:\n{formatted_allocation}")
+    return {"portfolio_allocation": formatted_allocation}
+    
 
 
 
