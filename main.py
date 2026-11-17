@@ -222,90 +222,105 @@ def portfolio_advisor_node(state: AGENTState) -> dict:
         f"- Cash: {macro_result.cash_percentage}%\n\n"
         f"Strategy Rationale: {macro_result.macro_reasoning}"
     )
+
+
     
     print(f"-> Strategic Mix Determined:\n{formatted_allocation}")
     return {"portfolio_allocation": formatted_allocation}
     
 
-
-
-
-
-
-
-                                                                                        # ORCHESTRATOR
-
-# -----------------NODE: ORCHESTRATOR ------------------------------
-def orchestrator_node(state: AGENTState) -> dict:
-    if not state.get("stock_analysis"):
-        return{"next_step" : "stock_analyser"}
-    elif not state.get("portfolio_allocation"):
-        return{"next_step" : "portfolio_advisor"}
-    elif not state.get("security_selection"):
-        return{"next_step": "security_selector"}
-    elif not state.get("final_report"):
-        return{"next_step" : "report_generator"}
-    else:
-        return{"next_step" : "FINISH"}
-#ROUTE DECIDER FUNCTION
-def route_next(state:  AGENTState):
-    return state["next_step"]
-
-
-
-
-                                                                                        # FINAL GRAPH
-agent_graph = StateGraph(AGENTState)
-
-agent_graph.add_node("orchestrator", orchestrator_node)
-agent_graph.add_node("stock_analyser", stock_analyser_node)
-agent_graph.add_node("portfolio_advisor", portfolio_advisor_node)
-agent_graph.add_node("security_selector", security_selector_node)
-agent_graph.add_node("report_generator", report_generator_node)
-
-agent_graph.add_edge(START, "orchestrator")
-
-#all report back to the orchestrator, MAIN RULE OF OUR MULTI-AGENT PIPELINE, EVERY SUB AGENT HAS A PARENT 
-agent_graph.add_edge("stock_analyser", "orchestrator")
-agent_graph.add_edge("portfolio_advisor", "orchestrator")
-agent_graph.add_edge("security_selector", "orchestrator")
-agent_graph.add_edge("report_generator", "orchestrator")
-
-#PARENT ORCHESTRATOR DECIDES WHICH NODE TO REACH BY CHECKING -> 1. IF stock_analysis STATE IS EMPTY, REACH THE stock_analyser_node WHICH POPULATES THE stock_analysis STATE AND REPORTS BACK TO ORCHESTRATOR    2. NOW stock_analysis STATE IS FILLED BUT portfolio_allocation STATE IS EMPTY, SO NOW ORCHESTRATOR REACHED THE portfolio_analyser_node WHICH POPULATES THE portfolio_allocation STATE AND AGAIN THE NODE REPORTS BACK TO THE ORCHESTRATOR.     3.NOW THE ORCHESTRATOR SEES THAT BOTH THE STATES ARE FILLED, SO IT REACHES THE report_generation_node WICH FILLS THE final_report STATE and again reports to orchestrator.      4.NOW THE ORCHESTRATOR SEES THAT ALL THREE STATES ARE FILLED, SO IT FINALLY REACHES THE END. 
-agent_graph.add_conditional_edges(
-    "orchestrator",
-    route_next,{                               ##ROUTE DECIDER FUNCTION used here
-        "stock_analyser": "stock_analyser",
-        "portfolio_advisor": "portfolio_advisor",
-        "security_selector": "security_selector",
-        "report_generator": "report_generator",
-        "FINISH": END
-    }
-)
-
-
-agent_pipeline = agent_graph.compile()
-
-
-if __name__ == "__main__":
-    # 1. Define the initial state with a test investment request
-    initial_input = {
-        "user_request": "I have $100,000 to invest. I want an aggressive strategy focused heavily on growth stocks for a 10-year horizon, but I want a 15% cash safety net to protect against high market volatility.",
-        "stock_analysis": "",
-        "portfolio_allocation": "",
-        "security_selection": "",
-        "next_step": "",
-        "final_report": ""
-    }
+# -----------------NODE: SECURITY SELECTOR(15% APPLE, 10% NVDA) ------------------------
+def security_selector_node(state: AGENTState) -> dict:
+    print("\n--- [Executing Node]: Security Selector (Micro Allocation Loop) ---")
     
-    print("=================== INITIATING WEALTH MANAGEMENT PIPELINE ===================")
+    macro_mix = state.get("portfolio_allocation", "")
+    analysis_report = state.get("stock_analysis", "")
     
-    # 2. Run the compiled graph pipeline synchronously
-    final_state = agent_pipeline.invoke(initial_input)
+    # 1. Bind the newly created screener tool specifically to this worker node's scope
+    tools_list = [screen_top_market_securities]
+    tools_map = {tool.name: tool for tool in tools_list}
+    llm_with_tools = llm.bind_tools(tools_list)
     
-    print("\n======================= PIPELINE EXECUTION COMPLETE =======================")
-    print("\nGenerated Investment Prospectus:\n")
+    system_prompt = (
+        "You are an expert Equity Research Analyst and Asset Selector.\n\n"
+        "Your single objective is to break down the high-level macro percentages into specific ticker weightings.\n"
+        "To make accurate choices, you MUST invoke the 'screen_top_market_securities' tool first to read live "
+        "fundamental data for potential company stocks or bond ETFs.\n\n"
+        "CRITICAL MATHEMATICAL RULES:\n"
+        "1. Every ticker percentage you assign MUST represent the percentage of the TOTAL portfolio (out of 100% total), NOT a percentage of a sub-asset class.\n"
+        "2. The sum of all your individual ticker percentages must exactly match the macro splits (e.g., if Equities is 80%, your stock tickers must add up to exactly 80%).\n"
+        "3. When printing dollar amounts, calculate them relative to the absolute total portfolio value (e.g., 20% of a $100,000 portfolio is $20,000)."
+    )
     
-    # 3. Print the final compiled document from the publisher node
-    print(final_state.get("final_report"))
+    human_prompt = f"Target Macro Mix From Advisor:\n{macro_mix}\n\nSupporting Financial Context:\n{analysis_report}"
+    
+    messages = [
+        SystemMessage(content=system_prompt),
+        HumanMessage(content=human_prompt)
+    ]
+    
+    max_iterations = 3
+    iterations = 0
+    
+    # 2. Autonomous loop for tool utilization and final synthesis
+    while iterations < max_iterations:
+        iterations += 1
+        print(f"Invoking Selector LLM (Iteration {iterations}/{max_iterations})...")
+        response = llm_with_tools.invoke(messages)
+        messages.append(response)
+        
+        # If no tools are called, the LLM has successfully synthesized the data
+        if not response.tool_calls:
+            print("-> Micro asset selection finalized with real-time data.")
+            return {"security_selection": response.content}
+            
+        # Dynamically execute requested tool call
+        for tool_call in response.tool_calls:
+            tool_name = tool_call["name"]
+            tool_args = tool_call["args"]
+            print(f"-> Selector requesting live market data feed via: {tool_name}")
+            
+            target_tool = tools_map[tool_name]
+            tool_output = target_tool.invoke(tool_args)
+            
+            messages.append(ToolMessage(content=str(tool_output), tool_call_id=tool_call["id"]))
+            
+    return {"security_selection": "Security picker timed out before finishing micro selection matrix."}
+    
 
+
+# -----------------NODE: FINAL REPORT GENERATION ------------------------
+def report_generator_node(state: AGENTState) -> dict:
+    print("\n--- [Executing Node]: Final Report Generation ---")
+    
+    # Extract all gathered assets from the shared central blackboard
+    user_goal = state.get("user_request", "")
+    analysis = state.get("stock_analysis", "")
+    macro_split = state.get("portfolio_allocation", "")
+    micro_split = state.get("security_selection", "")
+    
+    system_prompt = (
+        "You are an institutional Investment Publisher. Your job is to format raw quantitative "
+        "and qualitative data from your specialist sub-agents into a premium, beautifully typeset "
+        "financial portfolio prospectus report for your client.\n\n"
+        "Organize the report elegantly using clean Markdown headers (##), strong bolding (**), "
+        "and clear bulleted lists. Make sure it reads like a polished document from an elite wealth management firm."
+    )
+    
+    human_prompt = (
+        f"Compile and format the final Investment Prospectus using this asset data:\n\n"
+        f"### 1. CLIENT INVESTMENT OBJECTIVE\n{user_goal}\n\n"
+        f"### 2. MACRO MARKET ANALYSIS\n{analysis}\n\n"
+        f"### 3. STRATEGIC ASSET ALLOCATION OVERVIEW\n{macro_split}\n\n"
+        f"### 4. TACTICAL TICKER SELECTION MATRIX\n{micro_split}\n"
+    )
+    
+    # Standard linear invocation (no tools needed here, just pure synthesis)
+    response = llm.invoke([
+        SystemMessage(content=system_prompt),
+        HumanMessage(content=human_prompt)
+    ])
+    
+    print("-> Final Prospectus successfully generated!")
+    return {"final_report": response.content}
+    
