@@ -328,3 +328,25 @@ def report_generator_node(state: AGENTState) -> dict:
 
 
 
+
+                                                                                        # ORCHESTRATOR
+
+# -----------------NODE: ORCHESTRATOR ------------------------------
+def orchestrator_node(state: AGENTState) -> dict:
+    if not state.get("stock_analysis"):
+        return{"next_step" : "stock_analyser"}
+    elif not state.get("portfolio_allocation"):
+        return{"next_step" : "portfolio_advisor"}
+    elif not state.get("security_selection"):
+        return{"next_step": "security_selector"}
+    elif not state.get("final_report"):
+        return{"next_step" : "report_generator"}
+    else:
+        return{"next_step" : "FINISH"}
+#ROUTE DECIDER FUNCTION
+def route_next(state:  AGENTState):
+    return state["next_step"]
+
+
+
+
