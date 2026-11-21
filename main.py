@@ -350,3 +350,59 @@ def route_next(state:  AGENTState):
 
 
 
+                                                                                        # FINAL GRAPH
+agent_graph = StateGraph(AGENTState)
+
+agent_graph.add_node("orchestrator", orchestrator_node)
+agent_graph.add_node("stock_analyser", stock_analyser_node)
+agent_graph.add_node("portfolio_advisor", portfolio_advisor_node)
+agent_graph.add_node("security_selector", security_selector_node)
+agent_graph.add_node("report_generator", report_generator_node)
+
+agent_graph.add_edge(START, "orchestrator")
+
+#all report back to the orchestrator, MAIN RULE OF OUR MULTI-AGENT PIPELINE, EVERY SUB AGENT HAS A PARENT 
+agent_graph.add_edge("stock_analyser", "orchestrator")
+agent_graph.add_edge("portfolio_advisor", "orchestrator")
+agent_graph.add_edge("security_selector", "orchestrator")
+agent_graph.add_edge("report_generator", "orchestrator")
+
+#PARENT ORCHESTRATOR DECIDES WHICH NODE TO REACH BY CHECKING -> 1. IF stock_analysis STATE IS EMPTY, REACH THE stock_analyser_node WHICH POPULATES THE stock_analysis STATE AND REPORTS BACK TO ORCHESTRATOR    2. NOW stock_analysis STATE IS FILLED BUT portfolio_allocation STATE IS EMPTY, SO NOW ORCHESTRATOR REACHED THE portfolio_analyser_node WHICH POPULATES THE portfolio_allocation STATE AND AGAIN THE NODE REPORTS BACK TO THE ORCHESTRATOR.     3.NOW THE ORCHESTRATOR SEES THAT BOTH THE STATES ARE FILLED, SO IT REACHES THE report_generation_node WICH FILLS THE final_report STATE and again reports to orchestrator.      4.NOW THE ORCHESTRATOR SEES THAT ALL THREE STATES ARE FILLED, SO IT FINALLY REACHES THE END. 
+agent_graph.add_conditional_edges(
+    "orchestrator",
+    route_next,{                               ##ROUTE DECIDER FUNCTION used here
+        "stock_analyser": "stock_analyser",
+        "portfolio_advisor": "portfolio_advisor",
+        "security_selector": "security_selector",
+        "report_generator": "report_generator",
+        "FINISH": END
+    }
+)
+
+
+agent_pipeline = agent_graph.compile()
+
+
+if __name__ == "__main__":
+    # 1. Define the initial state with a test investment request
+    initial_input = {
+        "user_request": "I have $100,000 to invest. I want an aggressive strategy focused heavily on growth stocks for a 10-year horizon, but I want a 15% cash safety net to protect against high market volatility.",
+        "stock_analysis": "",
+        "portfolio_allocation": "",
+        "security_selection": "",
+        "next_step": "",
+        "final_report": ""
+    }
+    
+    print("=================== INITIATING WEALTH MANAGEMENT PIPELINE ===================")
+    
+    # 2. Run the compiled graph pipeline synchronously
+    final_state = agent_pipeline.invoke(initial_input)
+    
+    print("\n======================= PIPELINE EXECUTION COMPLETE =======================")
+    print("\nGenerated Investment Prospectus:\n")
+    
+    # 3. Print the final compiled document from the publisher node
+    print(final_state.get("final_report"))
+
+#main rule: every node reports to orchestrator everytime (centralized orchestration pattern (or supervisor pattern)), and ORCHESTRATOR DECIDES WHICH NODE TO REACH BY CHECKING -> 1. IF stock_analysis STATE IS EMPTY, REACH THE stock_analyser_node WHICH POPULATES THE stock_analysis STATE AND REPORTS BACK TO ORCHESTRATOR    2. NOW stock_analysis STATE IS FILLED BUT portfolio_allocation STATE IS EMPTY, SO NOW ORCHESTRATOR REACHED THE portfolio_analyser_node WHICH POPULATES THE portfolio_allocation STATE AND AGAIN THE NODE REPORTS BACK TO THE ORCHESTRATOR.     3.NOW THE ORCHESTRATOR SEES THAT BOTH THE STATES ARE FILLED, SO IT REACHES THE report_generation_node WICH FILLS THE final_report STATE and again reports to orchestrator.      4.NOW THE ORCHESTRATOR SEES THAT ALL THREE STATES ARE FILLED, SO IT FINALLY REACHES THE END. 
